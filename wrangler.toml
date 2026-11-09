@@ -1,0 +1,9 @@
+name = "hesabketab"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "hesabketab"
+# شناسه را ورک‌فلوی deploy موقع دیپلوی جایگزین می‌کند (دیتابیس را هم خودش می‌سازد)
+database_id = "REPLACE_DB_ID"

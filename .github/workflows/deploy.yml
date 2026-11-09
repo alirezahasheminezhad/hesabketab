@@ -1,0 +1,72 @@
+name: Deploy
+
+# با هر پوش روی main: تست، ساخت دیتابیس (اگر نبود)، مایگریشن، دیپلوی Worker و تنظیم webhook تلگرام
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'migrations/**', 'wrangler.toml', 'test/**', '.github/workflows/deploy.yml']
+  workflow_dispatch:
+
+concurrency: deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check secrets
+        run: |
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID BOT_TOKEN; do
+            [ -n "${!v}" ] || { echo "::error::Secret $v تنظیم نشده (Settings → Secrets and variables → Actions)"; exit 1; }
+          done
+
+      - name: Test
+        run: node --test
+
+      - name: Database
+        run: |
+          set -euo pipefail
+          find_id() { npx -y wrangler@4 d1 list --json | jq -r '.[] | select(.name=="hesabketab") | (.uuid // .database_id)'; }
+          ID=$(find_id)
+          if [ -z "$ID" ]; then npx -y wrangler@4 d1 create hesabketab; ID=$(find_id); fi
+          [ -n "$ID" ] || { echo "::error::ساخت دیتابیس D1 ناموفق بود (دسترسی D1 توکن را چک کن)"; exit 1; }
+          sed -i "s/REPLACE_DB_ID/$ID/" wrangler.toml
+          npx -y wrangler@4 d1 migrations apply hesabketab --remote
+
+      - name: Deploy worker
+        run: |
+          set -euo pipefail
+          npx -y wrangler@4 deploy 2>&1 | tee deploy.log
+          jq -n --arg b "$BOT_TOKEN" --arg g "$GH_PAT" \
+            '{BOT_TOKEN: $b} + (if $g != "" then {GH_PAT: $g} else {} end)' > secrets.json
+          npx -y wrangler@4 secret bulk secrets.json
+          rm secrets.json
+          grep -oE 'https://[A-Za-z0-9.-]+\.workers\.dev' deploy.log | head -1 > worker_url.txt
+
+      - name: Telegram webhook
+        run: |
+          set -euo pipefail
+          URL=$(cat worker_url.txt)
+          [ -n "$URL" ] || { echo "::error::آدرس Worker پیدا نشد"; exit 1; }
+          WH=$(printf '%s' "${BOT_TOKEN}:wh" | sha256sum | cut -d' ' -f1)
+          API="https://api.telegram.org/bot${BOT_TOKEN}"
+          curl -fsS "$API/setWebhook" \
+            --data-urlencode "url=${URL}/webhook" \
+            --data-urlencode "secret_token=${WH}" \
+            --data-urlencode 'allowed_updates=["message","callback_query"]'
+          curl -fsS "$API/setMyCommands" --data-urlencode 'commands=[
+            {"command":"balance","description":"بدهکار / بستانکار"},
+            {"command":"list","description":"۱۰ مورد آخر"},
+            {"command":"undo","description":"حذف آخرین ثبت من"},
+            {"command":"excel","description":"خروجی اکسل"},
+            {"command":"help","description":"راهنما"}]'
+          echo "Worker: $URL"

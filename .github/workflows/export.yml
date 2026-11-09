@@ -1,0 +1,76 @@
+name: Export Excel
+
+# اجرای دستی (دستور «اکسل» در گروه همین را اجرا می‌کند) یا هر شب ساعت ۰۰:۰۰ تهران.
+# فایل داخل exports/ کامیت می‌شود، ولی فقط اگر ریپو خصوصی باشد.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 20 * * *'
+
+permissions:
+  contents: write
+
+concurrency: export
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      EVENT: ${{ github.event_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install openpyxl
+
+      - name: Fetch data
+        id: fetch
+        run: |
+          set -euo pipefail
+          SUB=$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r .result.subdomain)
+          KEY=$(printf '%s' "${BOT_TOKEN}:export" | sha256sum | cut -d' ' -f1)
+          mkdir -p out exports
+          curl -fsS "https://hesabketab.${SUB}.workers.dev/export?key=${KEY}" | jq -S . > out/data.json
+          PRIVATE=$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)
+          echo "private=$PRIVATE" >> "$GITHUB_OUTPUT"
+          # شبانه فقط وقتی داده عوض شده و ریپو خصوصی است کار می‌کنیم؛ دستی همیشه
+          if [ "$EVENT" = workflow_dispatch ]; then RUN=true
+          elif [ "$PRIVATE" = true ] && ! cmp -s out/data.json exports/data.json; then RUN=true
+          else RUN=false; fi
+          echo "run=$RUN" >> "$GITHUB_OUTPUT"
+
+      - name: Build xlsx
+        if: steps.fetch.outputs.run == 'true'
+        run: python scripts/make_xlsx.py out/data.json out/hesabketab.xlsx
+
+      - name: Commit to repo (private repos only)
+        if: steps.fetch.outputs.run == 'true' && steps.fetch.outputs.private == 'true'
+        run: |
+          cp out/data.json out/hesabketab.xlsx exports/
+          git config user.name "hesabketab-bot"
+          git config user.email "hesabketab-bot@users.noreply.github.com"
+          git add exports
+          git diff --cached --quiet || { git commit -m "export: $(date -u +%F)"; git push; }
+
+      - name: Warn about public repo
+        if: steps.fetch.outputs.run == 'true' && steps.fetch.outputs.private != 'true'
+        run: echo "::warning::ریپو عمومی است؛ برای جلوگیری از انتشار حساب‌ها فایل داخل ریپو ذخیره نشد. ریپو را Private کن."
+
+      - name: Send to Telegram
+        if: steps.fetch.outputs.run == 'true' && github.event_name == 'workflow_dispatch'
+        run: |
+          set -euo pipefail
+          CHAT=$(jq -r '.chat // empty' out/data.json)
+          [ -n "$CHAT" ] || { echo "گروهی ثبت نشده؛ ارسال نشد"; exit 0; }
+          CAPTION="📊 خروجی اکسل حساب‌کتاب"
+          if [ "${{ steps.fetch.outputs.private }}" != true ]; then
+            CAPTION="$CAPTION"$'\n'"⚠️ ریپو عمومی است؛ فایل داخل ریپو ذخیره نشد. ریپو را Private کن."
+          fi
+          curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
+            -F "chat_id=$CHAT" -F "caption=$CAPTION" -F "document=@out/hesabketab.xlsx"
