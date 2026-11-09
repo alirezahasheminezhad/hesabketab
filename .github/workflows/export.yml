@@ -1,7 +1,7 @@
 name: Export Excel
 
 # اجرای دستی (دستور «اکسل» در گروه همین را اجرا می‌کند) یا هر شب ساعت ۰۰:۰۰ تهران.
-# فایل داخل exports/ کامیت می‌شود، ولی فقط اگر ریپو خصوصی باشد.
+# فایل داخل exports/ کامیت می‌شود.
 on:
   workflow_dispatch:
   schedule:
@@ -37,30 +37,22 @@ jobs:
           KEY=$(printf '%s' "${BOT_TOKEN}:export" | sha256sum | cut -d' ' -f1)
           mkdir -p out exports
           curl -fsS "https://hesabketab.${SUB}.workers.dev/export?key=${KEY}" | jq -S . > out/data.json
-          PRIVATE=$(gh api "repos/$GITHUB_REPOSITORY" --jq .private)
-          echo "private=$PRIVATE" >> "$GITHUB_OUTPUT"
-          # شبانه فقط وقتی داده عوض شده و ریپو خصوصی است کار می‌کنیم؛ دستی همیشه
-          if [ "$EVENT" = workflow_dispatch ]; then RUN=true
-          elif [ "$PRIVATE" = true ] && ! cmp -s out/data.json exports/data.json; then RUN=true
-          else RUN=false; fi
+          # شبانه فقط وقتی داده عوض شده کار می‌کنیم؛ دستی همیشه
+          if [ "$EVENT" = workflow_dispatch ] || ! cmp -s out/data.json exports/data.json; then RUN=true; else RUN=false; fi
           echo "run=$RUN" >> "$GITHUB_OUTPUT"
 
       - name: Build xlsx
         if: steps.fetch.outputs.run == 'true'
         run: python scripts/make_xlsx.py out/data.json out/hesabketab.xlsx
 
-      - name: Commit to repo (private repos only)
-        if: steps.fetch.outputs.run == 'true' && steps.fetch.outputs.private == 'true'
+      - name: Commit to repo
+        if: steps.fetch.outputs.run == 'true'
         run: |
           cp out/data.json out/hesabketab.xlsx exports/
           git config user.name "hesabketab-bot"
           git config user.email "hesabketab-bot@users.noreply.github.com"
           git add exports
           git diff --cached --quiet || { git commit -m "export: $(date -u +%F)"; git push; }
-
-      - name: Warn about public repo
-        if: steps.fetch.outputs.run == 'true' && steps.fetch.outputs.private != 'true'
-        run: echo "::warning::ریپو عمومی است؛ برای جلوگیری از انتشار حساب‌ها فایل داخل ریپو ذخیره نشد. ریپو را Private کن."
 
       - name: Send to Telegram
         if: steps.fetch.outputs.run == 'true' && github.event_name == 'workflow_dispatch'
@@ -69,8 +61,5 @@ jobs:
           CHAT=$(jq -r '.chat // empty' out/data.json)
           [ -n "$CHAT" ] || { echo "گروهی ثبت نشده؛ ارسال نشد"; exit 0; }
           CAPTION="📊 خروجی اکسل حساب‌کتاب"
-          if [ "${{ steps.fetch.outputs.private }}" != true ]; then
-            CAPTION="$CAPTION"$'\n'"⚠️ ریپو عمومی است؛ فایل داخل ریپو ذخیره نشد. ریپو را Private کن."
-          fi
           curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/sendDocument" \
             -F "chat_id=$CHAT" -F "caption=$CAPTION" -F "document=@out/hesabketab.xlsx"

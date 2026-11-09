@@ -31,10 +31,10 @@
 
 ## راه‌اندازی (یک‌بار)
 
-1. **ریپو را Private کنید** (Settings → General → Danger Zone → Change visibility). فایل اکسل و `exports/data.json` حساب‌های شماست؛ تا ریپو عمومی است ورک‌فلو آن‌ها را داخل ریپو **نمی‌گذارد** و فقط داخل گروه می‌فرستد.
+1. توجه: فایل اکسل و `exports/data.json` (مبلغ‌ها و شرح خریدها) داخل ریپو ذخیره می‌شود؛ اگر ریپو عمومی است یعنی برای همه قابل دیدن است.
 2. در **Settings → Secrets and variables → Actions** این Secretها را بسازید:
    - `BOT_TOKEN` — توکن ربات از BotFather
-   - `CLOUDFLARE_API_TOKEN` — توکن API با دسترسی *Workers Scripts: Edit* و *D1: Edit* (قالب «Edit Cloudflare Workers» کافی است)
+   - `CLOUDFLARE_API_TOKEN` — توکن API با دسترسی *Workers Scripts: Edit* و *D1: Edit* (قالب «Edit Cloudflare Workers»؛ حتماً چک کنید ردیف D1 هم Edit باشد و اگر نبود اضافه کنید)
    - `CLOUDFLARE_ACCOUNT_ID` — شناسهٔ حساب Cloudflare
    - `GH_PAT` *(اختیاری، برای دستور «اکسل» داخل گروه)* — توکن fine-grained گیتهاب فقط برای همین ریپو با دسترسی *Actions: Read and write*
 3. **Actions → Deploy → Run workflow**. این کار دیتابیس را می‌سازد، ربات را دیپلوی و webhook را تنظیم می‌کند. از این به بعد هر پوش روی `main` خودکار دیپلوی می‌شود.
@@ -46,7 +46,7 @@
 ## اکسل
 
 - دستور `اکسل` (نیاز به `GH_PAT`) یا **Actions → Export Excel → Run workflow** فایل را می‌سازد و داخل گروه می‌فرستد.
-- در ریپوی خصوصی، `exports/hesabketab.xlsx` و `exports/data.json` هم کامیت می‌شود (تاریخچهٔ گیت = نسخه‌های قبلی). هر شب ساعت ۰۰:۰۰ تهران هم اگر داده عوض شده باشد خودکار انجام می‌شود.
+- `exports/hesabketab.xlsx` و `exports/data.json` هم داخل ریپو کامیت می‌شود (تاریخچهٔ گیت = نسخه‌های قبلی). هر شب ساعت ۰۰:۰۰ تهران هم اگر داده عوض شده باشد خودکار انجام می‌شود.
 - برگهٔ «خلاصه» با فرمول زنده از برگهٔ «رکوردها» حساب می‌شود؛ ردیف را ویرایش کنید، تراز به‌روز می‌شود.
 
 ## ساختار
