@@ -91,8 +91,9 @@ const setState = (env, uid, eid, idx, chat, mid) =>
   ).bind(uid, eid, idx, chat, mid).run();
 
 // ---------- حذف خودکار پیام‌ها ----------
-// پیام‌های «نتیجه/هشدار» ربات بعد از N ثانیه پاک می‌شوند. منوی اصلی پاک نمی‌شود (وگرنه دکمه‌ها غیب می‌شود).
-// هر پیام در جدول ttl می‌نشیند و Durable Object دقیقاً در لحظهٔ مقرر بیدار می‌شود (alarm).
+// همهٔ پیام‌های ربات (از جمله منو) وقتی N ثانیه هیچ درخواستی نیامد پاک می‌شوند؛ هر دکمه یا پیام جدید موعد
+// همه را از نو تمدید می‌کند. با /start منو دوباره می‌آید. زمان‌بندی دقیق با Durable Object (alarm).
+// صفحه‌ای که ربات منتظر متن تایپی رویش است (state) پاک نمی‌شود، وگرنه ریپلای کاربر بی‌جواب می‌ماند.
 const TTL_OPTIONS = [15, 30, 60, 120, 300, 0]; // ثانیه؛ ۰ = خاموش
 const getTtl = async (env) => {
   const v = await getMeta(env, 'ttl');
@@ -100,19 +101,25 @@ const getTtl = async (env) => {
 };
 const ttlLabel = (s) => (s === 0 ? 'خاموش' : s < 60 ? `${fa(s)} ثانیه` : `${fa(s / 60)} دقیقه`);
 
+// mid: پیامی که همین الان در صف می‌آید (اختیاری). موعد همهٔ پیام‌های این چت را از الان تا N ثانیه می‌برد.
 async function expire(env, chat, mid) {
   try {
     const sec = await getTtl(env);
     if (!sec) return;
     const at = Date.now() + sec * 1000;
-    await env.DB.prepare(
-      'INSERT INTO ttl (chat_id, msg_id, del_at) VALUES (?,?,?) ON CONFLICT(chat_id, msg_id) DO UPDATE SET del_at = excluded.del_at'
-    ).bind(chat, mid, at).run();
+    if (mid) {
+      await env.DB.prepare(
+        'INSERT INTO ttl (chat_id, msg_id, del_at) VALUES (?,?,?) ON CONFLICT(chat_id, msg_id) DO UPDATE SET del_at = excluded.del_at'
+      ).bind(chat, mid, at).run();
+    }
+    await env.DB.prepare('UPDATE ttl SET del_at = ? WHERE chat_id = ?').bind(at, chat).run();
     await env.REAPER.get(env.REAPER.idFromName('r')).fetch(`https://reaper/?at=${at}`);
   } catch (e) {
     console.error(e.stack || e); // خطا در پاک‌کردن پیام نباید ثبت حساب را خراب کند
   }
 }
+
+const HOLD = "EXISTS (SELECT 1 FROM state s WHERE s.chat_id = ttl.chat_id AND s.msg_id = ttl.msg_id AND s.ts > datetime('now', '-30 minutes'))";
 
 export class Reaper extends DurableObject {
   async fetch(req) {
@@ -123,9 +130,14 @@ export class Reaper extends DurableObject {
   }
   async alarm() {
     const now = Date.now();
-    const due = (await this.env.DB.prepare('SELECT chat_id, msg_id FROM ttl WHERE del_at <= ?').bind(now).all()).results;
-    for (const r of due) await del(this.env, r.chat_id, r.msg_id); // اگر قبلاً پاک شده باشد خطا نمی‌دهد
-    await this.env.DB.prepare('DELETE FROM ttl WHERE del_at <= ?').bind(now).run();
+    const due = (await this.env.DB.prepare(`SELECT chat_id, msg_id FROM ttl WHERE del_at <= ? AND NOT ${HOLD}`).bind(now).all()).results;
+    for (const r of due) {
+      await del(this.env, r.chat_id, r.msg_id); // اگر قبلاً پاک شده باشد خطا نمی‌دهد
+      await this.env.DB.prepare('DELETE FROM ttl WHERE chat_id = ? AND msg_id = ?').bind(r.chat_id, r.msg_id).run();
+    }
+    // موعدرسیده‌های باقی‌مانده فقط همان «منتظر متن» هستند؛ بعداً دوباره نگاه می‌کنیم
+    const sec = (await getTtl(this.env)) || 30;
+    await this.env.DB.prepare('UPDATE ttl SET del_at = ? WHERE del_at <= ?').bind(now + sec * 1000, now).run();
     const next = (await this.env.DB.prepare('SELECT MIN(del_at) AS m FROM ttl').first())?.m;
     if (next) await this.ctx.storage.setAlarm(next);
   }
@@ -196,7 +208,7 @@ async function ttlView(env) {
   const cur = await getTtl(env);
   const row = TTL_OPTIONS.map((x) => btn(`${x === cur ? '✅ ' : ''}${x === 0 ? '🚫 خاموش' : ttlLabel(x)}`, `ts:${x}`));
   return {
-    text: `⏱ <b>حذف خودکار پیام‌ها</b>\n\nپیام‌های ربات (مثل «ثبت شد» و هشدارها) بعد از این مدت از گروه پاک می‌شوند تا شلوغ نشود. منوی اصلی پاک نمی‌شود و حساب‌ها در ربات و اکسل می‌مانند.\n\nالان: <b>${ttlLabel(cur)}</b>`,
+    text: `⏱ <b>حذف خودکار پیام‌ها</b>\n\nوقتی این مدت هیچ دکمه یا پیامی نیامد، همهٔ پیام‌های ربات (از جمله همین منو) از گروه پاک می‌شوند تا شلوغ نشود. هر دکمه یا پیام جدید، زمان را از نو شروع می‌کند. برای آوردن منو دوباره <code>/start</code> بزن. حساب‌ها در ربات و اکسل می‌مانند.\n\nالان: <b>${ttlLabel(cur)}</b>`,
     kb: { inline_keyboard: [row.slice(0, 3), row.slice(3), BACK] },
   };
 }
@@ -304,7 +316,10 @@ const settleConfirm = (payer, amount, ms) => ({
 async function sendPanel(env, chat) {
   const v = await menuView(env, await getMembers(env));
   const r = await say(env, chat, v.text, v.kb);
-  if (r.ok) await setMeta(env, 'panel', `${chat}:${r.result.message_id}`);
+  if (r.ok) {
+    await setMeta(env, 'panel', `${chat}:${r.result.message_id}`);
+    await expire(env, chat, r.result.message_id);
+  }
 }
 
 // ---------- ۵) پیام‌های متنی ----------
@@ -355,6 +370,7 @@ async function onTyped(env, msg, members, anon) {
   const me = members.find((m) => m.tg_id === st.user_id);
   if (!me) return;
   if (Date.now() - Date.parse(st.ts + 'Z') > 30 * 60 * 1000) return clearState(env, st.user_id);
+  await expire(env, st.chat_id, st.msg_id); // هر پیام تایپی هم موعد حذف را تمدید می‌کند
   const show = (v) => edit(env, st.chat_id, st.msg_id, v.text, v.kb);
 
   if (st.idx === -1) { // نام
@@ -408,6 +424,7 @@ async function onCallback(env, q) {
 
   const chat = q.message.chat.id;
   const mid = q.message.message_id;
+  await expire(env, chat, mid); // هر دکمه، موعد حذف را تمدید می‌کند
   const show = (v) => edit(env, chat, mid, v.text, v.kb);
   const [op, a, b, c] = String(q.data).split(':');
   const id = +a;
@@ -564,7 +581,6 @@ async function onCallback(env, q) {
       const sh = payer === 1 ? { share1: 0, share2: amount } : { share1: amount, share2: 0 };
       const e = await insertExpense(env, { kind: 'settle', status: 'ok', amount, payer, descr: 'تسویه', by: me.id, ...sh });
       await show({ text: entryText(e, members, await okRows(env)), kb: undoKb(e.id) });
-      await expire(env, chat, mid);
       await sendPanel(env, chat);
       return answer('ثبت شد ✅');
     }
@@ -583,7 +599,6 @@ async function finalize(env, e, split, chat, mid, ms) {
   ).bind(sh.share1, sh.share2, e.id).run();
   if (!r.meta.changes) return false;
   await edit(env, chat, mid, entryText({ ...e, ...sh, status: 'ok' }, ms, await okRows(env)), undoKb(e.id));
-  await expire(env, chat, mid);
   await sendPanel(env, chat);
   return true;
 }
