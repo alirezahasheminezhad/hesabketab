@@ -7,3 +7,12 @@ binding = "DB"
 database_name = "hesabketab"
 # شناسه را ورک‌فلوی deploy موقع دیپلوی جایگزین می‌کند (دیتابیس را هم خودش می‌سازد)
 database_id = "REPLACE_DB_ID"
+
+# زمان‌بندی دقیق حذف پیام‌ها: Durable Object با alarm (Cron حداقل یک‌دقیقه‌ای است)
+[[durable_objects.bindings]]
+name = "REAPER"
+class_name = "Reaper"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Reaper"]

@@ -6,10 +6,12 @@
 // ۵) پیام‌های متنی (فقط /start، و شرح/نام وقتی ربات منتظر آن است)
 // ۶) دکمه‌ها (callback)
 // ۷) ثبت نهایی و اکسل
+// (حذف خودکار پیام‌ها: بخش «حذف خودکار» زیر بخش ۳)
 //
 // همه‌چیز دکمه‌ای است: یک «پنل» (پیام منو) ویرایش می‌شود و هر مرحله جدا و قابل برگشت است.
 // ورودی متنی فقط وقتی ربات منتظر است (مبلغ، شرح، سهم دقیق، نام) و با ریپلای روی پیام ربات؛ این در حالت Privacy هم کار می‌کند.
 
+import { DurableObject } from 'cloudflare:workers';
 import { fa, num, money, computeShares, balance, parseAmountText, parseShareInput, rtl, iso, jalaliDate } from './lib.js';
 
 // ---------- ۱) ثابت‌ها ----------
@@ -88,6 +90,47 @@ const setState = (env, uid, eid, idx, chat, mid) =>
        chat_id = excluded.chat_id, msg_id = excluded.msg_id, ts = datetime('now')`
   ).bind(uid, eid, idx, chat, mid).run();
 
+// ---------- حذف خودکار پیام‌ها ----------
+// پیام‌های «نتیجه/هشدار» ربات بعد از N ثانیه پاک می‌شوند. منوی اصلی پاک نمی‌شود (وگرنه دکمه‌ها غیب می‌شود).
+// هر پیام در جدول ttl می‌نشیند و Durable Object دقیقاً در لحظهٔ مقرر بیدار می‌شود (alarm).
+const TTL_OPTIONS = [15, 30, 60, 120, 300, 0]; // ثانیه؛ ۰ = خاموش
+const getTtl = async (env) => {
+  const v = await getMeta(env, 'ttl');
+  return v == null ? 30 : +v;
+};
+const ttlLabel = (s) => (s === 0 ? 'خاموش' : s < 60 ? `${fa(s)} ثانیه` : `${fa(s / 60)} دقیقه`);
+
+async function expire(env, chat, mid) {
+  try {
+    const sec = await getTtl(env);
+    if (!sec) return;
+    const at = Date.now() + sec * 1000;
+    await env.DB.prepare(
+      'INSERT INTO ttl (chat_id, msg_id, del_at) VALUES (?,?,?) ON CONFLICT(chat_id, msg_id) DO UPDATE SET del_at = excluded.del_at'
+    ).bind(chat, mid, at).run();
+    await env.REAPER.get(env.REAPER.idFromName('r')).fetch(`https://reaper/?at=${at}`);
+  } catch (e) {
+    console.error(e.stack || e); // خطا در پاک‌کردن پیام نباید ثبت حساب را خراب کند
+  }
+}
+
+export class Reaper extends DurableObject {
+  async fetch(req) {
+    const at = +new URL(req.url).searchParams.get('at');
+    const cur = await this.ctx.storage.getAlarm();
+    if (cur == null || at < cur) await this.ctx.storage.setAlarm(at);
+    return new Response('ok');
+  }
+  async alarm() {
+    const now = Date.now();
+    const due = (await this.env.DB.prepare('SELECT chat_id, msg_id FROM ttl WHERE del_at <= ?').bind(now).all()).results;
+    for (const r of due) await del(this.env, r.chat_id, r.msg_id); // اگر قبلاً پاک شده باشد خطا نمی‌دهد
+    await this.env.DB.prepare('DELETE FROM ttl WHERE del_at <= ?').bind(now).run();
+    const next = (await this.env.DB.prepare('SELECT MIN(del_at) AS m FROM ttl').first())?.m;
+    if (next) await this.ctx.storage.setAlarm(next);
+  }
+}
+
 async function insertExpense(env, e) {
   const r = await env.DB.prepare(
     'INSERT INTO expenses (kind, status, amount, payer, share1, share2, descr, created_by) VALUES (?,?,?,?,?,?,?,?)'
@@ -149,6 +192,15 @@ function listLine(r, ms) {
     : `#${fa(r.id)} · ${d} · ${descrOf(r)} · ${num(r.amount)} · 💳 ${nm(ms, r.payer)} · سهم: ${num(r.share1)} | ${num(r.share2)}`;
 }
 
+async function ttlView(env) {
+  const cur = await getTtl(env);
+  const row = TTL_OPTIONS.map((x) => btn(`${x === cur ? '✅ ' : ''}${x === 0 ? '🚫 خاموش' : ttlLabel(x)}`, `ts:${x}`));
+  return {
+    text: `⏱ <b>حذف خودکار پیام‌ها</b>\n\nپیام‌های ربات (مثل «ثبت شد» و هشدارها) بعد از این مدت از گروه پاک می‌شوند تا شلوغ نشود. منوی اصلی پاک نمی‌شود و حساب‌ها در ربات و اکسل می‌مانند.\n\nالان: <b>${ttlLabel(cur)}</b>`,
+    kb: { inline_keyboard: [row.slice(0, 3), row.slice(3), BACK] },
+  };
+}
+
 async function menuView(env, ms) {
   const wait = ms.length < 2 ? '\n\n⏳ نفر دوم هنوز ثبت نشده؛ کافی است او هم یکی از دکمه‌ها را بزند.' : '';
   return {
@@ -159,6 +211,7 @@ async function menuView(env, ms) {
         [btn('⚖️ بدهکار / بستانکار', 'bal'), btn('🗒 ۱۰ مورد آخر', 'lst')],
         [btn('💸 تسویه', 'st'), btn('↩️ حذف آخرین ثبت من', 'ul')],
         [btn('📊 خروجی اکسل', 'xl'), btn('👤 نام من', 'nm')],
+        [btn(`⏱ حذف خودکار پیام‌ها: ${ttlLabel(await getTtl(env))}`, 'tt')],
       ],
     },
   };
@@ -272,7 +325,9 @@ async function onMessage(env, msg) {
     // ادمین ناشناس ثبت‌نام نمی‌شود؛ با اولین دکمه‌ای که بزند با شناسهٔ واقعی‌اش ثبت می‌شود
     if (!me && !anon) {
       if (members.length >= 2) {
-        return say(env, msg.chat.id, `⛔ این حساب فقط برای دو نفر است: ${whoIs(members)}.\nاگر شما یکی از آن‌ها هستید ولی با اکانت دیگری ثبت شده‌اید، به سازندهٔ ربات بگویید.`);
+        const r = await say(env, msg.chat.id, `⛔ این حساب فقط برای دو نفر است: ${whoIs(members)}.\nاگر شما یکی از آن‌ها هستید ولی با اکانت دیگری ثبت شده‌اید، به سازندهٔ ربات بگویید.`);
+        if (r.ok) await expire(env, msg.chat.id, r.result.message_id);
+        return;
       }
       me = await register(env, msg.from);
     }
@@ -476,6 +531,18 @@ async function onCallback(env, q) {
       });
       return answer();
 
+    case 'tt':
+      await show(await ttlView(env));
+      return answer();
+    case 'ts': {
+      const sec = +a;
+      if (!TTL_OPTIONS.includes(sec)) return answer();
+      await setMeta(env, 'ttl', String(sec));
+      if (sec === 0) await env.DB.prepare('DELETE FROM ttl').run(); // خاموش: چیزی در صف نماند
+      await show(await ttlView(env));
+      return answer('ذخیره شد');
+    }
+
     case 'st':
       await show(await settleView(env, members));
       return answer();
@@ -497,6 +564,7 @@ async function onCallback(env, q) {
       const sh = payer === 1 ? { share1: 0, share2: amount } : { share1: amount, share2: 0 };
       const e = await insertExpense(env, { kind: 'settle', status: 'ok', amount, payer, descr: 'تسویه', by: me.id, ...sh });
       await show({ text: entryText(e, members, await okRows(env)), kb: undoKb(e.id) });
+      await expire(env, chat, mid);
       await sendPanel(env, chat);
       return answer('ثبت شد ✅');
     }
@@ -515,6 +583,7 @@ async function finalize(env, e, split, chat, mid, ms) {
   ).bind(sh.share1, sh.share2, e.id).run();
   if (!r.meta.changes) return false;
   await edit(env, chat, mid, entryText({ ...e, ...sh, status: 'ok' }, ms, await okRows(env)), undoKb(e.id));
+  await expire(env, chat, mid);
   await sendPanel(env, chat);
   return true;
 }
