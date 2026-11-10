@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computeShares, balance, nextVal, money, g2j, jalaliDate } from '../src/lib.js';
+import { computeShares, balance, parseAmountText, parseShareInput, rtl, iso, money, g2j, jalaliDate } from '../src/lib.js';
 
 test('computeShares', () => {
   assert.deepEqual(computeShares(1001, { type: 'half' }), { share1: 500, share2: 501 });
@@ -26,17 +26,25 @@ test('balance: خرید، تسویه و برعکس شدن بدهی', () => {
   assert.equal(balance(rows).net1, -150000);
 });
 
-test('nextVal: کیبورد عددی', () => {
-  assert.equal(nextVal(0, '5'), 5);
-  assert.equal(nextVal(5, '00'), 500);
-  assert.equal(nextVal(500, '000'), 500000);
-  assert.equal(nextVal(0, '0'), 0);
-  assert.equal(nextVal(0, '000'), 0);
-  assert.equal(nextVal(500000, 'b'), 50000);
-  assert.equal(nextVal(5, 'b'), 0);
-  assert.equal(nextVal(0, 'b'), 0);
-  assert.equal(nextVal(999999999999, '0'), 999999999999); // سقف ۱۲ رقم
-  assert.equal(nextVal(7, 'ok'), 7);
+test('parseAmountText: مبلغ تایپی', () => {
+  const v = (t) => parseAmountText(t)?.value;
+  assert.equal(v('۵۰۰ هزار'), 500000);
+  assert.equal(v('۵۰۰٬۰۰۰'), 500000);
+  assert.equal(v('1.5 میلیون'), 1500000);
+  assert.equal(v('2 میلیون و 500 هزار'), 2500000);
+  assert.equal(v('500'), undefined); // بدون واحد و کمتر از ۱۰۰۰ مبهم است
+  assert.equal(v('پوشک'), undefined);
+});
+
+test('parseShareInput: مبلغ یا درصد', () => {
+  assert.equal(parseShareInput('200 هزار', 800000), 200000);
+  assert.equal(parseShareInput('۲۵٪', 800000), 200000);
+  assert.equal(parseShareInput('2 میلیون', 800000), null);
+});
+
+test('rtl/iso: هر خط RLM می‌گیرد، خط خالی نه', () => {
+  assert.equal(rtl('a\n\nb'), '\u200Fa\n\n\u200Fb');
+  assert.equal(iso('ahmad'), '\u2067ahmad\u2069');
 });
 
 test('money', () => {

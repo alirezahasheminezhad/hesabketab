@@ -8,9 +8,9 @@
 // ۷) ثبت نهایی و اکسل
 //
 // همه‌چیز دکمه‌ای است: یک «پنل» (پیام منو) ویرایش می‌شود و هر مرحله جدا و قابل برگشت است.
-// تنها ورودی متنی: شرح خرید و نام؛ آن هم با ریپلای روی پیام ربات (در حالت Privacy هم کار می‌کند).
+// ورودی متنی فقط وقتی ربات منتظر است (مبلغ، شرح، سهم دقیق، نام) و با ریپلای روی پیام ربات؛ این در حالت Privacy هم کار می‌کند.
 
-import { fa, num, money, computeShares, balance, nextVal, jalaliDate } from './lib.js';
+import { fa, num, money, computeShares, balance, parseAmountText, parseShareInput, rtl, iso, jalaliDate } from './lib.js';
 
 // ---------- ۱) ثابت‌ها ----------
 const REPO = 'alirezahasheminezhad/hesabketab';
@@ -35,10 +35,10 @@ const tg = (env, method, body) =>
   }).then((r) => r.json());
 
 const say = (env, chat, text, kb) =>
-  tg(env, 'sendMessage', { chat_id: chat, text, parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: kb });
+  tg(env, 'sendMessage', { chat_id: chat, text: rtl(text), parse_mode: 'HTML', disable_web_page_preview: true, reply_markup: kb });
 const edit = (env, chat, mid, text, kb) =>
   tg(env, 'editMessageText', {
-    chat_id: chat, message_id: mid, text, parse_mode: 'HTML', disable_web_page_preview: true,
+    chat_id: chat, message_id: mid, text: rtl(text), parse_mode: 'HTML', disable_web_page_preview: true,
     reply_markup: kb || { inline_keyboard: [] },
   });
 const del = (env, chat, mid) => tg(env, 'deleteMessage', { chat_id: chat, message_id: mid });
@@ -79,7 +79,8 @@ const getMeta = async (env, k) => (await env.DB.prepare('SELECT v FROM meta WHER
 const setMeta = (env, k, v) =>
   env.DB.prepare('INSERT INTO meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v').bind(k, v).run();
 const clearState = (env, uid) => env.DB.prepare('DELETE FROM state WHERE user_id = ?').bind(uid).run();
-// state: ربات منتظر یک پیام متنی از این کاربر است. idx 0 = شرح خرید، idx -1 = نام
+// state: ربات منتظر یک پیام متنی است (کلید = کسی که دکمه را زده).
+// idx: 0 شرح خرید | -1 نام | -2 مبلغ خرید | -3 مبلغ تسویه (expense_id = پرداخت‌کننده) | 1 یا 2 سهم دقیق همان نفر
 const setState = (env, uid, eid, idx, chat, mid) =>
   env.DB.prepare(
     `INSERT INTO state (user_id, expense_id, idx, chat_id, msg_id) VALUES (?,?,?,?,?)
@@ -102,11 +103,16 @@ async function register(env, from) {
 }
 
 // ---------- ۴) صفحه‌های دکمه‌ای ----------
-const nm = (ms, id) => esc(ms.find((m) => m.id === id)?.name ?? `نفر ${fa(id)}`); // برای متن (HTML)
-const bn = (ms, id) => (ms.find((m) => m.id === id)?.name ?? `نفر ${fa(id)}`).slice(0, 18); // برای روی دکمه
-const btn = (text, data) => ({ text, callback_data: data });
+// نام‌ها لاتین هم می‌شوند؛ هر نام داخل «جزیرهٔ» راست‌به‌چپ می‌رود تا جملهٔ فارسی به‌هم نریزد
+const nameOf = (ms, id) => ms.find((m) => m.id === id)?.name ?? `نفر ${fa(id)}`;
+const nm = (ms, id) => iso(esc(nameOf(ms, id))); // برای متن (HTML)
+const bn = (ms, id) => iso(nameOf(ms, id).slice(0, 18)); // برای روی دکمه
+const btn = (text, data) => ({ text: '\u200F' + text, callback_data: data }); // RLM: متن دکمه راست‌چین
 const BACK = [btn('🔙 منو', 'm')];
-const descrOf = (e) => (e.descr ? esc(e.descr) : 'بدون شرح');
+const descrOf = (e) => (e.descr ? iso(esc(e.descr)) : 'بدون شرح');
+const HOW = '(روی <b>همین پیام ریپلای</b> کن و بفرست)';
+const W = (w) => (w ? `\n\n⚠️ ${w}` : '');
+const BAD = 'مبلغ معتبر نیست. واحد را بنویس، مثلاً «۵۰۰ هزار» یا عدد کامل «۵۰۰۰۰۰».';
 
 const balLine = (b, ms) =>
   b.net1 === 0
@@ -158,28 +164,12 @@ async function menuView(env, ms) {
   };
 }
 
-// کیبورد عددی: مقدار فعلی داخل callback_data می‌ماند (بدون ذخیره در دیتابیس)
-function keypad(target, val, extra, back) {
-  const k = (label, key) => btn(label, `k:${target}:${val}:${key}`);
-  return {
-    inline_keyboard: [
-      [k('۱', '1'), k('۲', '2'), k('۳', '3')],
-      [k('۴', '4'), k('۵', '5'), k('۶', '6')],
-      [k('۷', '7'), k('۸', '8'), k('۹', '9')],
-      [k('۰', '0'), k('۰۰', '00'), k('۰۰۰', '000')],
-      ...extra,
-      [k('⌫ پاک', 'b'), k('✔️ تأیید', 'ok')],
-      back,
-    ],
-  };
-}
-
 const STEP = (n) => `➕ <b>خرید جدید</b> · مرحلهٔ ${fa(n)} از ۴`;
 const VIEW = {
-  // ۱) مبلغ
-  a: (e) => ({
-    text: `${STEP(1)}\nمبلغ را با دکمه‌ها وارد کن:\n\n💰 <b>${money(e.amount)}</b>`,
-    kb: keypad(`a${e.id}`, e.amount, [], [btn('❌ لغو', `x:${e.id}`)]),
+  // ۱) مبلغ (متنی)
+  a: (e, ms, warn) => ({
+    text: `${STEP(1)}\n\n💰 مبلغ خرید را بنویس.\n${HOW}\nمثلاً: <code>۵۰۰۰۰۰</code> یا <code>۵۰۰ هزار</code> یا <code>۱.۵ میلیون</code>${W(warn)}`,
+    kb: { inline_keyboard: [[btn('❌ لغو', `x:${e.id}`)]] },
   }),
   // ۲) شرح (متنی، اختیاری)
   d: (e, ms) => ({
@@ -226,13 +216,14 @@ const VIEW = {
   }),
 };
 
-const shareView = (e, ms, idx, val) => ({
-  text: `✂️ <b>سهم ${nm(ms, idx)}</b> از ${money(e.amount)}\n\n💰 <b>${money(val)}</b>\n(سهم ${nm(ms, 3 - idx)}: ${money(Math.max(e.amount - val, 0))})\n\nمبلغ را بزن یا یک درصد انتخاب کن:`,
-  kb: keypad(
-    `s${e.id}.${idx}`, val,
-    [[20, 25, 30, 40].map((p) => btn(`${fa(p)}٪`, `k:s${e.id}.${idx}:${val}:p${p}`))],
-    [btn('🔙 مرحلهٔ قبل', `o:${e.id}:x`), btn('❌ لغو', `x:${e.id}`)]
-  ),
+const shareView = (e, ms, idx, warn) => ({
+  text: `✂️ <b>سهم ${nm(ms, idx)}</b> از ${money(e.amount)}\n\nمبلغ یا درصد را بنویس.\n${HOW}\nمثلاً: <code>۲۰۰ هزار</code> یا <code>۳۰٪</code>\n(بقیه می‌شود سهم ${nm(ms, 3 - idx)})${W(warn)}\n\nیا یک درصد آماده را بزن:`,
+  kb: {
+    inline_keyboard: [
+      [20, 25, 30, 40, 50].map((p) => btn(`${fa(p)}٪`, `pc:${e.id}:${idx}:${p}`)),
+      [btn('🔙 مرحلهٔ قبل', `o:${e.id}:x`), btn('❌ لغو', `x:${e.id}`)],
+    ],
+  },
 });
 
 async function settleView(env, ms) {
@@ -247,9 +238,9 @@ async function settleView(env, ms) {
   rows.push(BACK);
   return { text: `💸 <b>تسویه</b>\n\n⚖️ ${balLine(b, ms)}\n\nکدام را ثبت کنم؟`, kb: { inline_keyboard: rows } };
 }
-const settleKeypadView = (payer, ms, val) => ({
-  text: `💸 <b>تسویه</b>: ${nm(ms, payer)} به ${nm(ms, 3 - payer)} پرداخت کرد\n\nمبلغ را وارد کن:\n💰 <b>${money(val)}</b>`,
-  kb: keypad(`t${payer}`, val, [], [btn('🔙 مرحلهٔ قبل', 'st')]),
+const settleAskView = (payer, ms, warn) => ({
+  text: `💸 <b>تسویه</b>: ${nm(ms, payer)} به ${nm(ms, 3 - payer)} پرداخت کرد\n\nمبلغ را بنویس.\n${HOW}\nمثلاً: <code>۲۰۰ هزار</code>${W(warn)}`,
+  kb: { inline_keyboard: [[btn('🔙 مرحلهٔ قبل', 'st')]] },
 });
 const settleConfirm = (payer, amount, ms) => ({
   text: `💸 <b>تأیید تسویه</b>\n${nm(ms, payer)} مبلغ ${money(amount)} به ${nm(ms, 3 - payer)} پرداخت کرد.\n\nدرست است؟`,
@@ -266,7 +257,8 @@ async function sendPanel(env, chat) {
 // ---------- ۵) پیام‌های متنی ----------
 // «ادمین ناشناس» گروه با این شناسه پیام می‌فرستد، نه با شناسهٔ واقعی خودش
 const ANON = 1087968824;
-const whoIs = (ms) => ms.map((m) => `«${esc(m.name)}»`).join(' و ');
+const whoIs = (ms) => ms.map((m) => `«${iso(esc(m.name))}»`).join(' و '); // برای متن HTML
+const whoPlain = (ms) => ms.map((m) => `«${iso(m.name)}»`).join(' و '); // برای هشدار دکمه
 
 async function onMessage(env, msg) {
   if (!msg?.text || !msg.from) return;
@@ -292,28 +284,56 @@ async function onMessage(env, msg) {
     }
     return sendPanel(env, msg.chat.id);
   }
-  if (me) await onTyped(env, msg, me);
+  await onTyped(env, msg, members, anon);
 }
 
-// شرح خرید یا نام جدید (وقتی ربات منتظر آن است)
-async function onTyped(env, msg, me) {
-  const st = await env.DB.prepare('SELECT * FROM state WHERE user_id = ?').bind(me.tg_id).first();
-  if (!st) return;
-  if (Date.now() - Date.parse(st.ts + 'Z') > 30 * 60 * 1000) return clearState(env, me.tg_id);
-  const text = msg.text.trim().slice(0, 60);
+// متنی که ربات منتظرش است: مبلغ، شرح، سهم، نام.
+// صفحه از روی «ریپلای به همان پیام» پیدا می‌شود. «ادمین ناشناس» با شناسهٔ واقعی‌اش نمی‌نویسد،
+// پس شناسهٔ فرستنده برای او فایده‌ای ندارد؛ بدون ریپلای آخرین انتظارِ همان چت را می‌گیریم.
+async function onTyped(env, msg, members, anon) {
+  const text = msg.text.trim().replace(/\s+/g, ' ');
   if (!text || text.startsWith('/')) return;
-  await clearState(env, me.tg_id);
+  const replyTo = msg.reply_to_message?.message_id;
+  const rows = (await env.DB.prepare('SELECT * FROM state WHERE chat_id = ? ORDER BY ts DESC').bind(msg.chat.id).all()).results;
+  const st = rows.find((r) => (!replyTo || r.msg_id === replyTo) && (anon || r.user_id === msg.from.id));
+  if (!st) return;
+  const me = members.find((m) => m.tg_id === st.user_id);
+  if (!me) return;
+  if (Date.now() - Date.parse(st.ts + 'Z') > 30 * 60 * 1000) return clearState(env, st.user_id);
+  const show = (v) => edit(env, st.chat_id, st.msg_id, v.text, v.kb);
 
-  if (st.idx === -1) {
+  if (st.idx === -1) { // نام
+    await clearState(env, st.user_id);
     await env.DB.prepare('UPDATE members SET name = ? WHERE id = ?').bind(text.slice(0, 30), me.id).run();
-    const v = await menuView(env, await getMembers(env));
-    return edit(env, st.chat_id, st.msg_id, v.text, v.kb);
+    return show(await menuView(env, await getMembers(env)));
+  }
+  if (st.idx === -3) { // مبلغ تسویه؛ expense_id = پرداخت‌کننده
+    const p = parseAmountText(text);
+    if (!p) return show(settleAskView(st.expense_id, members, BAD));
+    await clearState(env, st.user_id);
+    return show(settleConfirm(st.expense_id, p.value, members));
   }
   const e = await getExpense(env, st.expense_id);
-  if (!e || e.status !== 'draft') return;
-  await env.DB.prepare('UPDATE expenses SET descr = ? WHERE id = ?').bind(text, e.id).run();
-  e.descr = text;
-  return edit(env, st.chat_id, st.msg_id, ...Object.values(VIEW.p(e, await getMembers(env))));
+  if (!e || e.status !== 'draft') return clearState(env, st.user_id);
+  if (st.idx === -2) { // مبلغ خرید
+    const p = parseAmountText(text);
+    if (!p) return show(VIEW.a(e, members, BAD));
+    await env.DB.prepare('UPDATE expenses SET amount = ? WHERE id = ?').bind(p.value, e.id).run();
+    e.amount = p.value;
+    await setState(env, st.user_id, e.id, 0, st.chat_id, st.msg_id);
+    return show(VIEW.d(e, members));
+  }
+  if (st.idx === 0) { // شرح
+    await clearState(env, st.user_id);
+    e.descr = text.slice(0, 60);
+    await env.DB.prepare('UPDATE expenses SET descr = ? WHERE id = ?').bind(e.descr, e.id).run();
+    return show(VIEW.p(e, members));
+  }
+  // سهم دقیق (idx = ۱ یا ۲): مبلغ یا درصد
+  const v = parseShareInput(text, e.amount);
+  if (v == null) return show(shareView(e, members, st.idx, `عدد معتبر نیست (حداکثر ${money(e.amount)}).`));
+  await clearState(env, st.user_id);
+  await finalize(env, e, { type: 'part', idx: st.idx, value: v }, st.chat_id, st.msg_id, members);
 }
 
 // ---------- ۶) دکمه‌ها ----------
@@ -324,7 +344,7 @@ async function onCallback(env, q) {
   let me = members.find((m) => m.tg_id === q.from.id);
   if (!me) {
     // هر کس اولین‌بار دکمه‌ای بزند (تا سقف دو نفر) خودکار عضو می‌شود
-    if (members.length >= 2) return answer(`فقط ${whoIs(members)} عضو این حساب‌اند.`, true);
+    if (members.length >= 2) return answer(`فقط ${whoPlain(members)} عضو این حساب‌اند.`, true);
     me = await register(env, q.from);
     members.push(me);
   }
@@ -343,6 +363,7 @@ async function onCallback(env, q) {
   };
   // رفتن به یک مرحله؛ مرحلهٔ شرح منتظر متن می‌ماند
   const go = async (e, step) => {
+    if (step === 'a') await setState(env, q.from.id, e.id, -2, chat, mid);
     if (step === 'd') await setState(env, q.from.id, e.id, 0, chat, mid);
     await show(VIEW[step](e, members));
   };
@@ -357,45 +378,14 @@ async function onCallback(env, q) {
     case 'n': {
       if (members.length < 2) return answer('نفر دوم هنوز ثبت نشده؛ از او بخواه یکی از دکمه‌ها را بزند.', true);
       const e = await insertExpense(env, { status: 'draft', amount: 0, payer: 0, descr: '', by: me.id });
-      await show(VIEW.a(e));
+      await go(e, 'a');
       return answer();
     }
 
-    case 'k': { // کیبورد عددی: k:هدف:مقدار:کلید
-      const val = +b;
-      if (a[0] === 't') { // تسویه با مبلغ دلخواه
-        const payer = +a.slice(1);
-        if (c !== 'ok') {
-          await show(settleKeypadView(payer, members, nextVal(val, c)));
-          return answer();
-        }
-        if (val < 1) return answer('مبلغ را وارد کن.', true);
-        await show(settleConfirm(payer, val, members));
-        return answer();
-      }
-      const [eid, idx] = a.slice(1).split('.').map(Number);
-      const e = await getExpense(env, eid);
-      if (!e || e.status !== 'draft') return gone();
-      if (a[0] === 'a') { // مبلغ خرید
-        if (c !== 'ok') {
-          e.amount = nextVal(val, c);
-          await show(VIEW.a(e));
-          return answer();
-        }
-        if (val < 1) return answer('مبلغ را وارد کن.', true);
-        await env.DB.prepare('UPDATE expenses SET amount = ? WHERE id = ?').bind(val, e.id).run();
-        e.amount = val;
-        await go(e, 'd');
-        return answer();
-      }
-      // سهم دقیق
-      if (c[0] === 'p') return done(e, { type: 'part', idx, pct: +c.slice(1) });
-      if (c !== 'ok') {
-        await show(shareView(e, members, idx, nextVal(val, c)));
-        return answer();
-      }
-      if (val < 1 || val > e.amount) return answer(`مبلغ باید بین ۱ و ${money(e.amount)} باشد.`, true);
-      return done(e, { type: 'part', idx, value: val });
+    case 'pc': { // درصدِ آماده برای سهم دقیق: pc:خرید:نفر:درصد
+      const e = await draft();
+      if (!e) return gone();
+      return done(e, { type: 'part', idx: +b, pct: +c });
     }
 
     case 'g': { // رفتن به یک مرحله
@@ -425,7 +415,8 @@ async function onCallback(env, q) {
     case 'w': {
       const e = await draft();
       if (!e) return gone();
-      await show(shareView(e, members, +b, 0));
+      await setState(env, q.from.id, e.id, +b, chat, mid);
+      await show(shareView(e, members, +b));
       return answer();
     }
     case 'x': { // لغو خرید در حال ثبت (فقط پیش‌نویس؛ ثبت‌شده را با این دکمه نمی‌شود حذف کرد)
@@ -488,8 +479,9 @@ async function onCallback(env, q) {
     case 'st':
       await show(await settleView(env, members));
       return answer();
-    case 'tp': // تسویه با مبلغ دلخواه: انتخاب پرداخت‌کننده
-      await show(settleKeypadView(id, members, 0));
+    case 'tp': // تسویه با مبلغ دلخواه: مبلغ را می‌نویسد
+      await setState(env, q.from.id, id, -3, chat, mid);
+      await show(settleAskView(id, members));
       return answer();
     case 'sc': // تأیید تسویه کامل
       await show(settleConfirm(id, +b, members));

@@ -72,14 +72,9 @@ export function parseShareInput(text, amount) {
   return a.value <= amount ? a.value : null;
 }
 
-// کیبورد عددی روی دکمه‌ها: رقم/«۰۰»/«۰۰۰» اضافه می‌کند، 'b' آخرین رقم را پاک می‌کند.
-// سقف ۱۲ رقم؛ هر کلید دیگر (مثل 'ok') مقدار را عوض نمی‌کند.
-export function nextVal(val, key) {
-  if (key === 'b') return Math.floor(val / 10);
-  if (!/^\d+$/.test(key)) return val;
-  const n = val * 10 ** key.length + parseInt(key, 10);
-  return n > 999999999999 ? val : n;
-}
+// راست‌چین: RLM اول هر خط، و نام‌های لاتین داخل «جزیرهٔ» راست‌به‌چپ (RLI ... PDI)
+export const rtl = (t) => t.replace(/^(?=.)/gm, '\u200F');
+export const iso = (s) => '\u2067' + s + '\u2069';
 
 // ---------- ۳) سهم‌بندی و تراز ----------
 // خروجی: سهم نفر ۱ و نفر ۲ (جمعشان همیشه برابر مبلغ است)
