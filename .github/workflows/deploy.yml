@@ -64,9 +64,5 @@ jobs:
             --data-urlencode "secret_token=${WH}" \
             --data-urlencode 'allowed_updates=["message","callback_query"]'
           curl -fsS "$API/setMyCommands" --data-urlencode 'commands=[
-            {"command":"balance","description":"بدهکار / بستانکار"},
-            {"command":"list","description":"۱۰ مورد آخر"},
-            {"command":"undo","description":"حذف آخرین ثبت من"},
-            {"command":"excel","description":"خروجی اکسل"},
-            {"command":"help","description":"راهنما"}]'
+            {"command":"start","description":"نمایش منوی حساب‌کتاب"}]'
           echo "Worker: $URL"

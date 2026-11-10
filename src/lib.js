@@ -1,9 +1,8 @@
 // ============ فهرست ============
 // ۱) نرمال‌سازی متن و ارقام
 // ۲) تشخیص مبلغ (هزار / میلیون / «و»)
-// ۳) تشخیص خرید، تسویه و دستورها از متن گروه
-// ۴) سهم‌بندی و محاسبهٔ بدهکار/بستانکار
-// ۵) قالب‌بندی پول و تاریخ شمسی
+// ۳) سهم‌بندی و محاسبهٔ بدهکار/بستانکار
+// ۴) قالب‌بندی پول و تاریخ شمسی
 // منطق خالص و بدون وابستگی است تا با `node --test` تست شود.
 
 // ---------- ۱) نرمال‌سازی ----------
@@ -51,72 +50,13 @@ export function amountAt(s) {
   return Number.isFinite(total) && total > 0 ? { value: total, end: pos, explicit } : null;
 }
 
-// ---------- ۳) تشخیص نیت پیام ----------
-// برگرداندن شمارهٔ عضو (۱ یا ۲) از روی «من» یا نام؛ ۰ یعنی نامشخص
-export function nameIdx(word, members, senderIdx) {
-  const w = norm(word).toLowerCase();
-  if (w === 'من' || w === 'خودم') return senderIdx;
-  const m = members.find((x) => {
-    const n = norm(x.name).toLowerCase();
-    return n === w || n.split(' ')[0] === w;
-  });
-  return m ? m.id : 0;
-}
-
-const NOT_HALF = '(?!\\s+(?:کیلو|کیلوگرم|لیتر|متر|گرم|بسته|عدد|تا|من|روز|ساعت|بار)(?=\\s))';
-
-// «۵۰۰ هزار پوشک نصف» | «۳۰۰ هزار کرایه حساب احمد» | «۸۰۰ هزار لوازم سهم احمد ۲۰۰ هزار»
-export function parseExpense(text, members = [], senderIdx = 1) {
-  let s = norm(text);
-  const pre = /^(?:خرید|ثبت|\+)\s*/.exec(s);
-  if (pre) s = s.slice(pre[0].length);
+// متنی که کاربر در مرحلهٔ «مبلغ» می‌نویسد: مبلغ + (اختیاری) شرح.
+// عدد کوچک بدون واحد («500») مبهم است (تومان یا هزار تومان؟) و رد می‌شود.
+export function parseAmountText(text) {
+  const s = norm(text);
   const a = amountAt(s);
-  if (!a) return null;
-  // عدد کوچک بدون واحد (مثل «5 تا نون») خرید حساب نمی‌شود
-  if (a.value < 1000 && !a.explicit) return pre ? { error: 'amount' } : null;
-
-  let rest = ' ' + s.slice(a.end).trim() + ' ';
-  let split = null;
-
-  let m = /\sسهم\s+(\S+)\s+/.exec(rest);
-  if (m) {
-    const idx = nameIdx(m[1], members, senderIdx);
-    const tail = rest.slice(m.index + m[0].length);
-    const pm = /^(\d+(?:\.\d+)?)\s*(?:%|درصد)/.exec(tail);
-    const am = pm ? null : amountAt(tail);
-    if (idx && (pm || am)) {
-      split = pm ? { type: 'part', idx, pct: parseFloat(pm[1]) } : { type: 'part', idx, value: am.value };
-      rest = rest.slice(0, m.index) + ' ' + tail.slice(pm ? pm[0].length : am.end);
-    }
-  }
-  if (!split && (m = /\sحساب\s+(\S+)\s/.exec(rest))) {
-    const idx = nameIdx(m[1], members, senderIdx);
-    if (idx) {
-      split = { type: 'owner', idx };
-      rest = rest.replace(m[0], ' ');
-    }
-  }
-  if (!split) {
-    const h = new RegExp(
-      '\\s(?:نصف نصف|نصفه|نصف|تقسیم(?: بر (?:2|دو))?|مشترک|50 50|50-50)(?=\\s)' + NOT_HALF
-    );
-    if ((m = h.exec(rest))) {
-      split = { type: 'half' };
-      rest = rest.replace(m[0], ' ');
-    }
-  }
-  return { amount: a.value, descr: rest.replace(/\s+/g, ' ').trim() || 'بدون شرح', split };
-}
-
-// «تسویه ۵۰۰ هزار» (من پرداخت کردم) | «دریافت ۵۰۰ هزار» (من گرفتم) | «تسویه کامل»
-export function parseSettle(text) {
-  const m = /^(تسویه|دریافت)(?:\s+(.*))?$/.exec(norm(text));
-  if (!m) return null;
-  const kind = m[1] === 'تسویه' ? 'pay' : 'recv';
-  const rest = (m[2] || '').trim();
-  if (!rest || /^(?:کامل|همه|کل)$/.test(rest)) return { kind, full: true };
-  const a = amountAt(rest);
-  return a && (a.value >= 1000 || a.explicit) ? { kind, value: a.value } : null;
+  if (!a || (a.value < 1000 && !a.explicit)) return null;
+  return { value: a.value, rest: s.slice(a.end).trim() };
 }
 
 // ورودی «سهم بخشی»: مبلغ (۲۰۰ هزار) یا درصد (۳۰٪)؛ نامعتبر = null
@@ -132,28 +72,16 @@ export function parseShareInput(text, amount) {
   return a.value <= amount ? a.value : null;
 }
 
-const WORDS = {
-  'حساب': 'balance', 'مانده': 'balance', 'تراز': 'balance',
-  'لیست': 'list', 'فهرست': 'list',
-  'برگشت': 'undo', 'اکسل': 'excel', 'خروجی': 'excel', 'راهنما': 'help',
-};
-
-export function intent(text, members, senderIdx) {
-  const t = norm(text);
-  let m = /^\/(\w+)(?:@\w+)?(?:\s+([\s\S]*))?$/.exec(t);
-  if (m) return { type: 'cmd', name: m[1].toLowerCase(), arg: m[2] || '' };
-  if (WORDS[t]) return { type: 'cmd', name: WORDS[t], arg: '' };
-  if ((m = /^(?:حذف|پاک)\s+(\d+)$/.exec(t))) return { type: 'cmd', name: 'del', arg: m[1] };
-  if (/^(?:تسویه|دریافت)(?:\s|$)/.test(t)) {
-    const p = parseSettle(t);
-    if (p) return { type: 'settle', p };
-  }
-  const p = parseExpense(t, members, senderIdx);
-  if (p?.error) return { type: 'hint' };
-  return p ? { type: 'expense', p } : null;
+// کیبورد عددی روی دکمه‌ها: رقم/«۰۰»/«۰۰۰» اضافه می‌کند، 'b' آخرین رقم را پاک می‌کند.
+// سقف ۱۲ رقم؛ هر کلید دیگر (مثل 'ok') مقدار را عوض نمی‌کند.
+export function nextVal(val, key) {
+  if (key === 'b') return Math.floor(val / 10);
+  if (!/^\d+$/.test(key)) return val;
+  const n = val * 10 ** key.length + parseInt(key, 10);
+  return n > 999999999999 ? val : n;
 }
 
-// ---------- ۴) سهم‌بندی و تراز ----------
+// ---------- ۳) سهم‌بندی و تراز ----------
 // خروجی: سهم نفر ۱ و نفر ۲ (جمعشان همیشه برابر مبلغ است)
 export function computeShares(amount, split) {
   if (split.type === 'half') {
@@ -189,7 +117,7 @@ export function balance(rows) {
   return { paid, share, setPaid, setGot, net1 };
 }
 
-// ---------- ۵) قالب‌بندی ----------
+// ---------- ۴) قالب‌بندی ----------
 export const fa = (s) => String(s).replace(/\d/g, (d) => '۰۱۲۳۴۵۶۷۸۹'[d]);
 export const num = (n) =>
   fa(String(Math.abs(Math.round(n))).replace(/\B(?=(\d{3})+(?!\d))/g, '٬'));
