@@ -23,6 +23,19 @@
       "share2": 137500,
       "time": "14:01",
       "type": "خرید"
+    },
+    {
+      "amount": 1350000,
+      "by": "Mr Alireza",
+      "date": "1405/08/22",
+      "descr": "خرید یک بکس سیج",
+      "id": 9,
+      "payer": 1,
+      "payer_name": "ahmad_mo",
+      "share1": 675000,
+      "share2": 675000,
+      "time": "23:36",
+      "type": "خرید"
     }
   ]
 }
